@@ -19,12 +19,15 @@ async function callModel(
   state: typeof GraphAnnotation.State,
   config: LangGraphRunnableConfig,
 ): Promise<{ messages: BaseMessage[] }> {
-  const llm = await initChatModel();
   const store = getStoreFromConfigOrThrow(config);
   const configurable = ensureConfiguration(config);
-  const memories = await store.search(["memories", configurable.userId], {
-    limit: 10,
-  });
+  const tools = initializeTools(config);
+
+  // Run independent async operations concurrently
+  const [llm, memories] = await Promise.all([
+    initChatModel(),
+    store.search(["memories", configurable.userId], { limit: 10 }),
+  ]);
 
   let formatted =
     memories
@@ -38,17 +41,9 @@ async function callModel(
     .replace("{user_info}", formatted)
     .replace("{time}", new Date().toISOString());
 
-  const tools = initializeTools(config);
-  const boundLLM = llm.bind({
-    tools: tools,
-    tool_choice: "auto",
-  });
-
-  const result = await boundLLM.invoke(
+  const result = await llm.bind({ tools, tool_choice: "auto" }).invoke(
     [{ role: "system", content: sys }, ...state.messages],
-    {
-      configurable: splitModelAndProvider(configurable.model),
-    },
+    { configurable: splitModelAndProvider(configurable.model) },
   );
 
   return { messages: [result] };
@@ -59,15 +54,12 @@ async function storeMemory(
   config: LangGraphRunnableConfig,
 ): Promise<{ messages: BaseMessage[] }> {
   const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
-  const toolCalls = lastMessage.tool_calls || [];
+  const toolCalls = lastMessage.tool_calls ?? [];
 
-  const tools = initializeTools(config);
-  const upsertMemoryTool = tools[0];
+  const [upsertMemoryTool] = initializeTools(config);
 
   const savedMemories = await Promise.all(
-    toolCalls.map(async (tc) => {
-      return await upsertMemoryTool.invoke(tc);
-    }),
+    toolCalls.map((tc) => upsertMemoryTool.invoke(tc)),
   );
 
   return { messages: savedMemories };
